@@ -4,8 +4,9 @@ from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
 from streamlit_folium import st_folium
 import folium
+from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Viagem Pro", layout="wide")
+st.set_page_config(page_title="Viagem Pro - Alertas", layout="wide")
 
 # Inicialização do estado
 if 'etapa' not in st.session_state: st.session_state.etapa = 1
@@ -22,7 +23,8 @@ if st.session_state.etapa == 1:
         
         if st.form_submit_button("Calcular Rota e Definir Nomes"):
             try:
-                geolocator = Nominatim(user_agent="viagem_app_v2")
+                # User_agent único evita erros de conexão
+                geolocator = Nominatim(user_agent="gestor_viagem_v3_alerta")
                 loc1 = geolocator.geocode(origem)
                 loc2 = geolocator.geocode(destino)
                 
@@ -36,106 +38,81 @@ if st.session_state.etapa == 1:
                     st.session_state.etapa = 2
                     st.rerun()
                 else:
-                    st.error("Endereço não encontrado. Verifique a grafia (Ex: Cidade, Estado).")
+                    st.error("Endereço não encontrado. Digite 'Cidade, Estado'.")
             except:
-                st.error("Erro de conexão com o serviço de mapas.")
+                st.error("Serviço de mapas ocupado. Aguarde 2 segundos e tente novamente.")
 
-# --- ETAPA 2: CADASTRO OBRIGATÓRIO DE NOMES ---
+# --- ETAPA 2: CADASTRO DE NOMES ---
 elif st.session_state.etapa == 2:
     st.header("👥 Passo 2: Quem são os viajantes?")
-    st.info(f"Distância: {st.session_state.distancia:.2f} km")
-    
     with st.form("cadastro_nomes"):
         lista_nomes = []
         for i in range(st.session_state.qtd):
-            n = st.text_input(f"Nome do Viajante {i+1}", key=f"user_{i}")
+            n = st.text_input(f"Nome do Viajante {i+1}")
             lista_nomes.append(n)
-        
-        if st.form_submit_button("Finalizar e Abrir Painel"):
-            if all(n.strip() != "" for n in lista_nomes):
+        if st.form_submit_button("Começar Viagem"):
+            if all(lista_nomes):
                 st.session_state.participantes = lista_nomes
                 st.session_state.etapa = 3
                 st.rerun()
-            else:
-                st.error("Todos os nomes devem ser preenchidos!")
 
-# --- ETAPA 3: PAINEL DE GASTOS E RANKING ---
+# --- ETAPA 3: PAINEL COM ALERTAS ---
 elif st.session_state.etapa == 3:
     st.title(f"🚗 Viagem: {st.session_state.local_destino}")
+
+    # --- SEÇÃO DE ALERTAS CRÍTICOS ---
+    hoje = datetime.now().date()
+    prazo_alerta = hoje + timedelta(days=3)
     
-    # Exibição do Mapa
-    with st.expander("🗺️ Ver Rota no Mapa"):
-        m = folium.Map(location=st.session_state.coord_origem, zoom_start=6)
-        folium.Marker(st.session_state.coord_origem, tooltip="Origem", icon=folium.Icon(color='blue')).add_to(m)
-        folium.Marker(st.session_state.coord_destino, tooltip="Destino", icon=folium.Icon(color='red')).add_to(m)
-        folium.PolyLine([st.session_state.coord_origem, st.session_state.coord_destino], color="red", weight=2.5).add_to(m)
-        st_folium(m, width=1200, height=300)
+    alertas = []
+    for g in st.session_state.gastos:
+        if g['forma'] == "Cartão de Crédito" and isinstance(g['venc'], datetime):
+            venc_data = g['venc']
+        elif g['forma'] == "Cartão de Crédito" and hasattr(g['venc'], 'date'): # Caso venha do date_input
+            venc_data = g['venc']
+        else: continue
+
+        if hoje <= venc_data <= prazo_alerta:
+            # Verifica se ainda há alguém que não pagou esse gasto
+            if len(g['quitado_por']) < len(st.session_state.participantes):
+                alertas.append(f"⚠️ **{g['desc']}** vence dia {venc_data.strftime('%d/%m')}! (Faltam pagamentos)")
+
+    if alertas:
+        for alerta in alertas:
+            st.error(alerta)
 
     # Registro de Gasto
-    st.divider()
-    with st.form("novo_gasto", clear_on_submit=True):
-        c1, c2, c3, c4 = st.columns(4)
-        desc = c1.text_input("Descrição do Gasto")
-        valor = c2.number_input("Valor Total (R$)", min_value=0.01)
-        pagador = c3.selectbox("Quem pagou?", st.session_state.participantes)
-        cat = c4.selectbox("Categoria", ["Alimentação", "Transporte", "Hospedagem", "Lazer"])
-        
-        c5, c6 = st.columns(2)
-        forma = c5.selectbox("Forma de Pagamento", ["Dinheiro", "Pix", "Cartão de Crédito"])
-        venc = c6.date_input("Vencimento (Se Cartão)")
+    with st.expander("➕ Adicionar Novo Gasto"):
+        with st.form("novo_gasto", clear_on_submit=True):
+            c1, c2, c3 = st.columns(3)
+            desc = c1.text_input("O que comprou?")
+            valor = c2.number_input("Valor Total", min_value=0.0)
+            pagador = c3.selectbox("Quem pagou?", st.session_state.participantes)
+            
+            c4, c5 = st.columns(2)
+            forma = c4.selectbox("Pagamento", ["Dinheiro", "Pix", "Cartão de Crédito"])
+            venc = c5.date_input("Vencimento")
+            
+            if st.form_submit_button("Salvar"):
+                st.session_state.gastos.append({
+                    "desc": desc, "valor": valor, "pagador": pagador,
+                    "forma": forma, "venc": venc, "quitado_por": [pagador]
+                })
+                st.rerun()
 
-        if st.form_submit_button("Registrar Gasto"):
-            st.session_state.gastos.append({
-                "id": len(st.session_state.gastos),
-                "desc": desc, "valor": valor, "pagador": pagador,
-                "cat": cat, "forma": forma, "venc": venc,
-                "quitado_por": [pagador] # O pagador já começa como quitado
-            })
-            st.rerun()
-
-    # Listagem de Gastos com Botão Pagar
-    st.subheader("💳 Gastos e Quitações")
+    # Exibição e Quitação
+    st.subheader("📋 Gestão de Pagamentos")
     for i, g in enumerate(st.session_state.gastos):
         valor_ind = g['valor'] / len(st.session_state.participantes)
+        pendentes = [p for p in st.session_state.participantes if p not in g['quitado_por']]
+        
         with st.container(border=True):
-            col_info, col_btn = st.columns([3, 2])
-            col_info.write(f"**{g['desc']}** | Total: R$ {g['valor']:.2f} (R$ {valor_ind:.2f} p/ pessoa)")
-            col_info.caption(f"Pago por: {g['pagador']} | Categoria: {g['cat']} | Vencimento: {g['venc']}")
-            
-            # Mostrar quem falta pagar e botão
-            pendentes = [p for p in st.session_state.participantes if p not in g['quitado_por']]
-            if not pendentes:
-                col_btn.success("✅ Gasto totalmente quitado por todos!")
-            else:
-                col_btn.write(f"Falta pagar: {', '.join(pendentes)}")
-                p_selecionado = col_btn.selectbox("Marcar como pago para:", pendentes, key=f"sel_{i}")
-                if col_btn.button(f"Confirmar Pagamento de {p_selecionado}", key=f"btn_{i}"):
-                    st.session_state.gastos[i]['quitado_por'].append(p_selecionado)
+            col1, col2 = st.columns([3, 1])
+            col1.write(f"**{g['desc']}** | R$ {g['valor']:.2f}")
+            if pendentes:
+                p_pago = col2.selectbox("Quitar para:", pendentes, key=f"q_{i}")
+                if col2.button("✔ Confirmar", key=f"b_{i}"):
+                    st.session_state.gastos[i]['quitado_por'].append(p_pago)
                     st.rerun()
-
-    # RANKING
-    st.divider()
-    st.subheader("🏆 Ranking Financeiro")
-    saldos = {n: 0.0 for n in st.session_state.participantes}
-    
-    for g in st.session_state.gastos:
-        v_ind = g['valor'] / len(st.session_state.participantes)
-        for p in st.session_state.participantes:
-            if p == g['pagador']:
-                # Ele recebe de todos que ainda não pagaram
-                pendentes_count = len(st.session_state.participantes) - len(g['quitado_por'])
-                saldos[p] += (v_ind * pendentes_count)
-            elif p not in g['quitado_por']:
-                # Ele deve a sua parte
-                saldos[p] -= v_ind
-
-    col_rank1, col_rank2 = st.columns(2)
-    for i, (nome, saldo) in enumerate(sorted(saldos.items(), key=lambda x: x[1])):
-        cor = "red" if saldo < 0 else "green"
-        col_target = col_rank1 if i % 2 == 0 else col_rank2
-        col_target.markdown(f"**{nome}**: :{cor}[R$ {saldo:.2f}]")
-
-    # Botão de Exportar
-    if st.session_state.gastos:
-        csv = pd.DataFrame(st.session_state.gastos).to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Baixar Relatório Completo", csv, "viagem.csv", "text/csv")
+            else:
+                col2.success("Tudo Pago!")
